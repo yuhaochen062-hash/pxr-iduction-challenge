@@ -77,10 +77,16 @@ pixi run python download_data.py
 
 项目默认使用 PostgreSQL 端口 `5433`，Unix socket 为 `/tmp`。
 
+`db-start` 只会启动已有的 PostgreSQL cluster，不会自动创建 `db/pgdata`。
+第一次使用时先初始化一次；以后直接从 `pixi run db-start` 开始。确认目录中
+已有重要数据库后，不要重复执行 `initdb`。
+
 ```bash
+mkdir -p db/pgdata
+pixi run initdb -D db/pgdata --auth-local=trust --auth-host=trust
 pixi run db-start
 pixi run db-status
-createdb -h /tmp -p 5433 pxr_challenge 2>/dev/null || true
+pixi run createdb -h /tmp -p 5433 pxr_challenge 2>/dev/null || true
 
 # 先确认服务器提供 CREATE EXTENSION rdkit，再执行 schema
 pixi run db-psql -f db/schema.sql
