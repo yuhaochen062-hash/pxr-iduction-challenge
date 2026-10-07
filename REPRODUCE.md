@@ -89,6 +89,7 @@ pixi run db-status
 pixi run createdb -h /tmp -p 5433 pxr_challenge 2>/dev/null || true
 
 # 先确认服务器提供 CREATE EXTENSION rdkit，再执行 schema
+# pixi run db-psql -c "CREATE EXTENSION IF NOT EXISTS rdkit;"
 pixi run db-psql -f db/schema.sql
 pixi run db-psql -f db/experiments_schema.sql
 pixi run db-psql -f db/lb_submissions_schema.sql
@@ -123,16 +124,199 @@ pixi run python db/compute_mordred.py
 pixi run python db/compute_jazzy.py
 ```
 
-后续按需生成 foundation model 特征：
+### 最终方案需要：CheMeleon
+
+最终 tabular member 的特征名包含 `cheme_2d_full_boltz...`，其中包含
+CheMeleon 指纹。因此完整复现最终 ensemble 时需要执行：
 
 ```bash
 pixi run python db/compute_chemeleon.py
-pixi run python db/compute_embeddings.py
-pixi run python db/compute_chemfm.py
 ```
 
-这些任务可能需要大量磁盘、内存、GPU 时间和模型下载。每次生成后保存版本和
-行数。应先验证 2D 特征和数据库连接，再开始 Boltz-2 全量任务。
+这个脚本会从 Zenodo 下载 checkpoint 到 `~/.chemprop/chemeleon_mp.pt`，读取
+数据库中 `std_mol IS NOT NULL` 的化合物，在 CPU 上生成约 300 维指纹，并清空
+重建 `compound_chemeleon` 表。运行完成后检查覆盖率和维度：
+
+```bash
+pixi run db-psql -c "SELECT count(*) FROM compounds WHERE std_mol IS NOT NULL;"
+pixi run db-psql -c "SELECT count(*), array_length(embedding, 1) FROM compound_chemeleon GROUP BY 2;"
+```
+
+### 可选探索：Hugging Face encoder embedding
+
+`compute_embeddings.py` 用于 ChemBERTa、MoLFormer 等通用预训练模型，不是当前
+canonical ensemble 的直接前置条件。测试某个 embedding 时只指定一个模型：
+
+```bash
+pixi run python db/compute_embeddings.py chemberta-77m-mlm
+```
+
+不带参数会依次处理脚本内的全部模型，通常没有必要。脚本会下载权重并清空对应
+目标表后重建；表名和 feature 名称见 `run_train.py` 的 `EMBEDDING_TABLES`。
+
+### 可选探索：ChemFM
+
+ChemFM 目前不是最终白名单的必要输入。只有明确要测试 ChemFM 时才执行：
+
+```bash
+pixi run db-psql -f db/compound_chemfm_schema.sql
+pixi run python db/compute_chemfm.py --size 1b
+# 或者：pixi run python db/compute_chemfm.py --size 3b
+```
+
+ChemFM 脚本使用 bf16 和针对 RTX 5080 设定的 batch size；RTX 2080 Ti 不应在未
+调整 dtype 和 batch size 前直接运行。
+
+### 运行边界
+
+先完成 RDKit、Mordred、Jazzy 和 CheMeleon，并确认数据库行数与特征维度正确，再
+安排 Boltz-2 等耗时任务。ChemBERTa、MoLFormer、ChemFM 和其他 frozen low-fidelity
+embedding 属于独立实验轴，不要因为脚本存在就全部运行。以上脚本都会写入或重建
+目标表，重跑前先确认不会覆盖需要保留的结果。
+
+### CheMeleon 之后的实际执行顺序
+
+完成 CheMeleon 后，先检查覆盖率和维度：
+
+```bash
+pixi run db-psql -c "SELECT count(*) FROM compounds WHERE std_mol IS NOT NULL;"
+pixi run db-psql -c "SELECT count(*), array_length(embedding, 1) FROM compound_chemeleon GROUP BY 2;"
+```
+
+接下来按以下顺序继续。这里的目标是先得到第一个可训练的最终特征组合，
+不要同时运行所有探索性 foundation model。
+
+#### 1. 训练 ChemProp 低保真模型
+
+该模型预测 `log2FC @ 8.25 μM` 和 `log2FC @ 33 μM`，之后作为两个特征输入
+TabPFN。先训练默认 seed=42 的 checkpoint：
+
+```bash
+pixi run python track1_activity/scripts/run_chemprop_pretrain.py \
+  --seed 42
+```
+
+默认输出为：
+
+```text
+track1_activity/checkpoints/chemprop_pretrain/pretrain.pt
+```
+
+用 checkpoint 为 train/test 化合物生成预测：
+
+```bash
+pixi run python track1_activity/scripts/run_chemprop_predict_log2fc.py
+```
+
+默认输出为 `data/chemprop_pretrain_log2fc_predictions.parquet`。检查输出：
+
+```bash
+pixi run python - <<'PY'
+import pandas as pd
+
+df = pd.read_parquet("data/chemprop_pretrain_log2fc_predictions.parquet")
+print(df.shape)
+print(df.columns.tolist())
+print(df.head())
+PY
+```
+
+输出必须包含 `log2fc_8p25_pred` 和 `log2fc_33_pred` 两列。
+
+#### 2. 运行 Boltz-2 smoke test
+
+`2d_full_boltz` 特征依赖 Boltz-2 输出。先创建数据库表：
+
+```bash
+pixi run db-psql -f db/boltz2_schema.sql
+```
+
+Boltz 输入 YAML 使用预计算的 PXR 多序列比对文件 `pxr.a3m`。该文件不在
+Git 中。作者在历史 `CLAUDE.md` 中记录的做法是：从 AlphaFold Database 获取
+`AF-O75469-F1-msa_v6.a3m`，先保存到本地 Windows 下载目录，再复制到：
+
+```text
+structures/boltz2/msa/pxr.a3m
+```
+
+项目当前没有保留该文件，也没有记录一个仍然有效的下载地址。不要继续使用旧的
+失效 URL；应从 AlphaFold Database 的当前数据入口或作者保存的原始文件中获取，
+并在实验记录中保存文件的来源和校验值。确认输入确实引用该文件：
+
+```bash
+grep -R "pxr.a3m" structures/boltz2/inputs_smoke/*.yaml | head
+```
+
+先只生成 10 个化合物的输入，验证外部 Boltz-2 安装和 GPU：
+
+```bash
+pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py \
+  --smoke
+
+# 使用项目外部安装的 Boltz-2；参数与 full_run.sh 的 R1 设置一致
+boltz predict track1_activity/structures/boltz2/inputs_smoke \
+  --out_dir track1_activity/structures/boltz2/outputs_smoke \
+  --use_potentials \
+  --diffusion_samples 1 \
+  --recycling_steps 3 \
+  --output_format mmcif \
+  --accelerator gpu \
+  --devices 1 \
+  --num_workers 2
+```
+
+Boltz-2 使用项目外部的 `uv tool` 安装，不要默认在 Pixi 环境中直接导入或运行。
+项目中的 Pixi 环境负责数据库、特征处理和训练脚本；独立的 Boltz 环境负责
+`boltz predict` 推理。这样可以避免 Boltz-2 与 Pixi 中的 PyTorch、CUDA、Triton
+和 `cuequivariance` 版本互相冲突。
+
+先确认服务器上的外部命令可用：
+
+```bash
+which boltz
+boltz --help
+```
+
+如果 `boltz` 不存在，应先按照 Boltz-2 的安装说明配置 `uv tool` 环境，不要直接
+在 Pixi 环境中执行 `pip install boltz` 作为替代。仓库的全量脚本也会直接调用
+外部的 `boltz` 命令，并设置需要的 CUDA 动态库路径。
+
+smoke test 成功后再生成完整输入并启动全量任务：
+
+```bash
+pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py
+bash track1_activity/boltz2/scripts/boltz2_full_run.sh
+```
+
+完整任务预计需要数天，脚本支持中断后恢复。完成后将结果写入数据库：
+
+```bash
+pixi run python track1_activity/boltz2/scripts/boltz2_postprocess.py --db
+pixi run db-psql -c \
+"SELECT count(*), count(*) FILTER (WHERE preprocessing_failed = false) FROM compound_boltz2;"
+```
+
+#### 3. 生成和训练第一个 TabPFN member
+
+完成 RDKit/Mordred/Jazzy、CheMeleon、ChemProp prediction 和 Boltz-2 基础输出后，
+先训练最小的最终特征 member：
+
+```bash
+pixi run python track1_activity/scripts/run_train.py \
+  --model tabpfn \
+  --feature cheme_2d_full_boltz_log2fc_pred \
+  --split umap \
+  --umap-seed 42 \
+  --umap-clusters 50 \
+  --trials 0
+```
+
+该步骤必须成功生成 OOF 和 test prediction，并在 `experiments` 与
+`experiment_oof_predictions` 中留下记录。确认这个 member 能正常运行后，再继续
+多 seed、top500、ChemProp frozen embedding 和其他 ensemble member。
+
+此阶段暂时不要运行 `compute_embeddings.py` 的全部模型或 `compute_chemfm.py`；
+它们不是当前 canonical ensemble 的必要前置步骤。
 
 ## 6. 固定切分和特征约定
 
