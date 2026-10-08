@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Full run: run boltz predict on all 4653 PXR compounds (train + test)
+# Full run: run boltz predict on all PXR compounds returned by the input builder
+# (currently 4652 for the published 4139-train + 513-test snapshot)
 # with the R1 settings validated by the smoke test.
 #
 # This is expected to take roughly 4 days on an RTX 5080. Boltz CLI

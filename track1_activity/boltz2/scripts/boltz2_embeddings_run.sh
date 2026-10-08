@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Embeddings-only run: extract trunk s/z embeddings for all 4653 PXR
+# Embeddings-only run: extract trunk s/z embeddings for all PXR
 # compounds without re-running diffusion sampling, confidence, or
 # affinity. Reuses the cached preprocessed records and MSA NPZs from
 # the prior full structure run, so no MSA download or preprocessing

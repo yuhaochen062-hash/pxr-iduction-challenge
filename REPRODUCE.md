@@ -243,12 +243,12 @@ structures/boltz2/msa/pxr.a3m
 Boltz 官方的 MSA server 代替本地文件，不需要重新生成 `pxr.a3m`。官方文档说明，
 `--use_msa_server` 默认调用 `https://api.colabfold.com` 自动生成 MMseqs2 MSA。
 
-使用 MSA server 时，必须重新生成不含 `msa` 字段的 YAML：
+使用 MSA server 的推荐方式是只查询一次。先生成一个单化合物的 seed 输入：
 
 ```bash
 rm -rf structures/boltz2/inputs_smoke
 pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py \
-  --smoke --use-msa-server
+  --smoke --limit 1 --use-msa-server
 ```
 
 如果服务器上的脚本仍然报 `unrecognized arguments: --use-msa-server`，说明代码
@@ -287,10 +287,10 @@ PY
 grep -R "msa:" structures/boltz2/inputs_smoke || true
 ```
 
-先只生成 10 个化合物的输入，验证外部 Boltz-2 安装和 GPU：
+先只对这个 seed 输入调用一次 MSA server：
 
 ```bash
-# 使用项目外部安装的 Boltz-2；参数与 full_run.sh 的 R1 设置一致
+# 这一步只处理 1 个化合物，用来生成共享的 PXR MSA CSV
 boltz predict structures/boltz2/inputs_smoke \
   --out_dir structures/boltz2/outputs_smoke \
   --use_potentials \
@@ -301,6 +301,63 @@ boltz predict structures/boltz2/inputs_smoke \
   --accelerator gpu \
   --devices 1 \
   --num_workers 2
+```
+
+Boltz 会把 server 生成的 MSA 写到输出树的 `msa/*_A.csv`。复制它并让完整输入
+全部引用同一个文件：
+
+```bash
+rm -rf structures/boltz2/inputs
+pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py \
+  --use-msa-server
+
+pixi run python track1_activity/boltz2/scripts/boltz2_prepare_shared_msa.py \
+  --server-output structures/boltz2/outputs_smoke \
+  --inputs structures/boltz2/inputs \
+  --shared-msa structures/boltz2/msa/pxr_server.csv
+```
+
+检查所有 YAML 都引用同一个共享 MSA：
+
+```bash
+grep -R "msa:" structures/boltz2/inputs | head
+find structures/boltz2/inputs -name '*.yaml' -print0 \
+  | xargs -0 grep -h "msa:" \
+  | sort -u
+```
+
+之后的 4652 个化合物运行必须去掉 `--use_msa_server`，因为 YAML 已经提供本地
+共享 MSA。这样 Boltz 不会为每个化合物重复访问 MSA server 或生成临时 MSA：
+
+```bash
+nohup boltz predict structures/boltz2/inputs \
+  --out_dir structures/boltz2/outputs \
+  --use_potentials \
+  --diffusion_samples 1 \
+  --recycling_steps 3 \
+  --output_format mmcif \
+  --accelerator gpu \
+  --devices 1 \
+  --num_workers 2 \
+  > boltz_full.log 2>&1 &
+echo $! > boltz_full.pid
+```
+
+Seed 运行完成后先检查是否真的产生了 1 个预测目录和 MSA CSV：
+
+```bash
+find structures/boltz2/outputs_smoke -type f | head
+find structures/boltz2/outputs_smoke/boltz_results_inputs_smoke/predictions \
+  -mindepth 1 -maxdepth 1 -type d | wc -l
+find structures/boltz2/outputs_smoke/boltz_results_inputs_smoke/msa \
+  -name '*_A.csv' -type f
+```
+
+如果需要验证数据库写入链路，可以先处理 smoke 结果：
+
+```bash
+pixi run python track1_activity/boltz2/scripts/boltz2_postprocess.py \
+  --smoke --db
 ```
 
 Boltz-2 使用项目外部的 `uv tool` 安装，不要默认在 Pixi 环境中直接导入或运行。
@@ -319,19 +376,64 @@ boltz --help
 在 Pixi 环境中执行 `pip install boltz` 作为替代。仓库的全量脚本也会直接调用
 外部的 `boltz` 命令，并设置需要的 CUDA 动态库路径。
 
-smoke test 成功后再生成完整输入并启动全量任务。全量脚本通过
-`USE_MSA_SERVER=1` 把同一个选项传给 Boltz：
+如果不使用上面的共享 MSA 方案，才需要让全量脚本通过
+`USE_MSA_SERVER=1` 对每个输入查询 server：
 
 ```bash
 rm -rf structures/boltz2/inputs
 pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py \
   --use-msa-server
-USE_MSA_SERVER=1 bash track1_activity/boltz2/scripts/boltz2_full_run.sh
+nohup env USE_MSA_SERVER=1 \
+  bash track1_activity/boltz2/scripts/boltz2_full_run.sh \
+  > boltz_full.log 2>&1 &
+echo $! > boltz_full.pid
+```
+
+查看后台日志和进程：
+
+```bash
+tail -f boltz_full.log
+ps -p "$(cat boltz_full.pid)" -o pid,etime,stat,cmd
+```
+
+如果当前 checkout 的输入目录是 `track1_activity/structures/boltz2/inputs`，且
+全量脚本仍然固定使用根目录 `structures/boltz2/inputs`，直接提交 Boltz 命令：
+
+```bash
+nohup boltz predict track1_activity/structures/boltz2/inputs \
+  --out_dir track1_activity/structures/boltz2/outputs \
+  --use_msa_server \
+  --use_potentials \
+  --diffusion_samples 1 \
+  --recycling_steps 3 \
+  --output_format mmcif \
+  --accelerator gpu \
+  --devices 1 \
+  --num_workers 2 \
+  > track1_activity/structures/boltz2/boltz_full.log 2>&1 &
+echo $! > track1_activity/structures/boltz2/boltz_full.pid
 ```
 
 旧版脚本的全量兼容方式是先用不带 `--use-msa-server` 的命令生成 YAML，再对
 `structures/boltz2/inputs/` 执行同样的 PyYAML 删除步骤，最后设置
 `USE_MSA_SERVER=1` 运行全量脚本。
+
+输入数量以数据库查询结果为准。当前公开数据快照是 4,139 条 train 加 513 条
+test，共 4,652 个输入；旧脚本注释中的 4,653 来自较早的 4,140-train 数据库。
+可以在服务器上确认实际数量：
+
+```bash
+pixi run db-psql -c "SELECT count(*) AS train_rows, count(DISTINCT compound_id) AS train_compounds FROM train_activity;"
+pixi run db-psql -c "SELECT count(*) AS test_rows, count(DISTINCT compound_id) AS test_compounds FROM test_activity;"
+pixi run db-psql -c "SELECT count(*) FROM compounds c WHERE c.std_smiles IS NOT NULL AND (EXISTS (SELECT 1 FROM train_activity t WHERE t.compound_id = c.id) OR EXISTS (SELECT 1 FROM test_activity t WHERE t.compound_id = c.id));"
+```
+
+如果 train/test 行数加起来是 4,653 但输入仍是 4,652，检查是否有化合物缺少
+标准化 SMILES：
+
+```bash
+pixi run db-psql -c "SELECT c.id FROM compounds c WHERE c.std_smiles IS NULL AND (EXISTS (SELECT 1 FROM train_activity t WHERE t.compound_id = c.id) OR EXISTS (SELECT 1 FROM test_activity t WHERE t.compound_id = c.id));"
+```
 
 MSA server 依赖服务器访问 `https://api.colabfold.com`，每个 protein input 都会
 产生远程查询和本地缓存，不能把它当成离线运行。若服务器无法访问该服务，需要
@@ -343,6 +445,23 @@ MSA server 依赖服务器访问 `https://api.colabfold.com`，每个 protein in
 pixi run python track1_activity/boltz2/scripts/boltz2_postprocess.py --db
 pixi run db-psql -c \
 "SELECT count(*), count(*) FILTER (WHERE preprocessing_failed = false) FROM compound_boltz2;"
+```
+
+`2d_full_boltz` 还需要从完整 Boltz 输出生成两个派生特征：
+
+```bash
+pixi run python track1_activity/scripts/eda_cv_prep/11_compute_jazzy_pose.py
+pixi run python track1_activity/scripts/extract_boltz2_confidence_features.py
+```
+
+确认下列产物存在后，才能训练第一个完整 tabular member：
+
+```text
+compound_boltz2                 # 数据库表
+compound_boltz2_jazzy           # 数据库表
+data/boltz2_confidence_features.parquet
+data/chemprop_pretrain_log2fc_predictions.parquet
+compound_chemeleon              # 数据库表
 ```
 
 #### 3. 生成和训练第一个 TabPFN member
