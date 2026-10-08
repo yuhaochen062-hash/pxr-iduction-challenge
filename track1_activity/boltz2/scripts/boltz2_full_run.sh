@@ -26,6 +26,7 @@ INPUT_DIR="structures/boltz2/inputs"
 OUTPUT_DIR="structures/boltz2/outputs"
 LOG_DIR="logs"
 LOG_FILE="${LOG_DIR}/boltz2_full.log"
+USE_MSA_SERVER="${USE_MSA_SERVER:-0}"
 
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
@@ -37,7 +38,13 @@ echo "[boltz2_full] boltz: $(boltz --help 2>&1 | head -1)" | tee -a "$LOG_FILE"
 echo | tee -a "$LOG_FILE"
 
 # R1 settings (validated by smoke test, see commit 175aa25)
+msa_args=()
+if [[ "$USE_MSA_SERVER" == "1" ]]; then
+    msa_args+=(--use_msa_server)
+fi
+
 boltz predict "$INPUT_DIR" \
+    "${msa_args[@]}" \
     --out_dir "$OUTPUT_DIR" \
     --use_potentials \
     --diffusion_samples 1 \

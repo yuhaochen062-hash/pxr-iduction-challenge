@@ -17,7 +17,7 @@ from .constants import (
 
 def build_yaml(
     smiles: str,
-    msa_path: Path = MSA_PATH,
+    msa_path: Path | None = MSA_PATH,
     use_pocket_constraint: bool = True,
     request_affinity: bool = True,
 ) -> dict[str, Any]:
@@ -29,9 +29,8 @@ def build_yaml(
         Ligand SMILES string. Should be a standardised SMILES (e.g. from
         ``compounds.std_smiles`` produced by ChEMBL structure pipeline).
     msa_path
-        Path to the precomputed PXR MSA in a3m format. The path is written
-        as an absolute path in the YAML so that boltz can resolve it from
-        any working directory.
+        Path to a precomputed PXR MSA in a3m format. If ``None``, omit the
+        MSA field; Boltz can then generate it with ``--use_msa_server``.
     use_pocket_constraint
         Whether to add a soft pocket constraint anchoring the ligand to the
         core PXR pocket residues. ``force=False`` so the constraint is a
@@ -39,16 +38,17 @@ def build_yaml(
     request_affinity
         Whether to request the Boltz-2 affinity head output.
     """
+    protein: dict[str, Any] = {
+        "id": PROTEIN_CHAIN_ID,
+        "sequence": PXR_SEQUENCE,
+    }
+    if msa_path is not None:
+        protein["msa"] = str(Path(msa_path).resolve())
+
     yaml_dict: dict[str, Any] = {
         "version": 1,
         "sequences": [
-            {
-                "protein": {
-                    "id": PROTEIN_CHAIN_ID,
-                    "sequence": PXR_SEQUENCE,
-                    "msa": str(Path(msa_path).resolve()),
-                }
-            },
+            {"protein": protein},
             {
                 "ligand": {
                     "id": LIGAND_CHAIN_ID,

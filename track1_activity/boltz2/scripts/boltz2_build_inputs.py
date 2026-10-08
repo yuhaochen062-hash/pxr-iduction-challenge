@@ -66,6 +66,7 @@ def write_inputs(
     inputs_dir: Path,
     manifest_path: Path,
     use_pocket_constraint: bool,
+    use_msa_server: bool,
 ) -> None:
     """Write a YAML per compound and the manifest CSV."""
     inputs_dir.mkdir(parents=True, exist_ok=True)
@@ -76,11 +77,14 @@ def write_inputs(
     for compound_id, split, smiles in compounds:
         yaml_path = inputs_dir.joinpath(f"{compound_id:05d}.yaml")
         if not yaml_path.exists():
-            yaml_dict = build_yaml(
-                smiles=smiles,
-                use_pocket_constraint=use_pocket_constraint,
-                request_affinity=True,
-            )
+            build_kwargs = {
+                "smiles": smiles,
+                "use_pocket_constraint": use_pocket_constraint,
+                "request_affinity": True,
+            }
+            if use_msa_server:
+                build_kwargs["msa_path"] = None
+            yaml_dict = build_yaml(**build_kwargs)
             write_yaml(yaml_dict, yaml_path)
             written_count += 1
         manifest_rows.append(
@@ -123,6 +127,11 @@ def main() -> None:
         action="store_true",
         help="Disable the pocket constraint in the generated YAMLs.",
     )
+    parser.add_argument(
+        "--use-msa-server",
+        action="store_true",
+        help="Omit the local MSA path; use Boltz --use_msa_server at prediction time.",
+    )
     args = parser.parse_args()
 
     if args.smoke:
@@ -140,6 +149,7 @@ def main() -> None:
         inputs_dir=inputs_dir,
         manifest_path=manifest_path,
         use_pocket_constraint=not args.no_pocket,
+        use_msa_server=args.use_msa_server,
     )
 
 

@@ -231,7 +231,7 @@ PY
 pixi run db-psql -f db/boltz2_schema.sql
 ```
 
-Boltz 输入 YAML 使用预计算的 PXR 多序列比对文件 `pxr.a3m`。该文件不在
+Boltz 输入 YAML 原本使用预计算的 PXR 多序列比对文件 `pxr.a3m`。该文件不在
 Git 中。作者在历史 `CLAUDE.md` 中记录的做法是：从 AlphaFold Database 获取
 `AF-O75469-F1-msa_v6.a3m`，先保存到本地 Windows 下载目录，再复制到：
 
@@ -239,24 +239,62 @@ Git 中。作者在历史 `CLAUDE.md` 中记录的做法是：从 AlphaFold Data
 structures/boltz2/msa/pxr.a3m
 ```
 
-项目当前没有保留该文件，也没有记录一个仍然有效的下载地址。不要继续使用旧的
-失效 URL；应从 AlphaFold Database 的当前数据入口或作者保存的原始文件中获取，
-并在实验记录中保存文件的来源和校验值。确认输入确实引用该文件：
+项目当前没有保留该文件，旧的 AlphaFold URL 也可能已经失效。现在可以使用
+Boltz 官方的 MSA server 代替本地文件，不需要重新生成 `pxr.a3m`。官方文档说明，
+`--use_msa_server` 默认调用 `https://api.colabfold.com` 自动生成 MMseqs2 MSA。
+
+使用 MSA server 时，必须重新生成不含 `msa` 字段的 YAML：
 
 ```bash
-grep -R "pxr.a3m" structures/boltz2/inputs_smoke/*.yaml | head
+rm -rf structures/boltz2/inputs_smoke
+pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py \
+  --smoke --use-msa-server
+```
+
+如果服务器上的脚本仍然报 `unrecognized arguments: --use-msa-server`，说明代码
+版本还没有同步到支持该选项的提交。可以先确认版本：
+
+```bash
+git status --short --branch
+git log -1 --oneline
+```
+
+推荐将仓库更新到包含该选项的版本；如果暂时不能更新，可用旧脚本生成输入，再
+用 PyYAML 删除每个 YAML 中的 `msa` 字段：
+
+```bash
+rm -rf structures/boltz2/inputs_smoke
+pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py --smoke
+pixi run python - <<'PY'
+from pathlib import Path
+import yaml
+
+root = Path("structures/boltz2/inputs_smoke")
+for path in root.glob("*.yaml"):
+    data = yaml.safe_load(path.read_text())
+    for entry in data.get("sequences", []):
+        protein = entry.get("protein")
+        if protein:
+            protein.pop("msa", None)
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+print(f"updated {len(list(root.glob('*.yaml')))} YAML files")
+PY
+```
+
+检查没有残留 MSA 路径：
+
+```bash
+grep -R "msa:" structures/boltz2/inputs_smoke || true
 ```
 
 先只生成 10 个化合物的输入，验证外部 Boltz-2 安装和 GPU：
 
 ```bash
-pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py \
-  --smoke
-
 # 使用项目外部安装的 Boltz-2；参数与 full_run.sh 的 R1 设置一致
-boltz predict track1_activity/structures/boltz2/inputs_smoke \
-  --out_dir track1_activity/structures/boltz2/outputs_smoke \
+boltz predict structures/boltz2/inputs_smoke \
+  --out_dir structures/boltz2/outputs_smoke \
   --use_potentials \
+  --use_msa_server \
   --diffusion_samples 1 \
   --recycling_steps 3 \
   --output_format mmcif \
@@ -281,12 +319,23 @@ boltz --help
 在 Pixi 环境中执行 `pip install boltz` 作为替代。仓库的全量脚本也会直接调用
 外部的 `boltz` 命令，并设置需要的 CUDA 动态库路径。
 
-smoke test 成功后再生成完整输入并启动全量任务：
+smoke test 成功后再生成完整输入并启动全量任务。全量脚本通过
+`USE_MSA_SERVER=1` 把同一个选项传给 Boltz：
 
 ```bash
-pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py
-bash track1_activity/boltz2/scripts/boltz2_full_run.sh
+rm -rf structures/boltz2/inputs
+pixi run python track1_activity/boltz2/scripts/boltz2_build_inputs.py \
+  --use-msa-server
+USE_MSA_SERVER=1 bash track1_activity/boltz2/scripts/boltz2_full_run.sh
 ```
+
+旧版脚本的全量兼容方式是先用不带 `--use-msa-server` 的命令生成 YAML，再对
+`structures/boltz2/inputs/` 执行同样的 PyYAML 删除步骤，最后设置
+`USE_MSA_SERVER=1` 运行全量脚本。
+
+MSA server 依赖服务器访问 `https://api.colabfold.com`，每个 protein input 都会
+产生远程查询和本地缓存，不能把它当成离线运行。若服务器无法访问该服务，需要
+使用作者保存的原始 `AF-O75469-F1-msa_v6.a3m`；不要把旧下载 URL 当作可靠来源。
 
 完整任务预计需要数天，脚本支持中断后恢复。完成后将结果写入数据库：
 
